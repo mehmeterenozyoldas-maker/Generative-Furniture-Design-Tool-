@@ -1,0 +1,5 @@
+{
+  "name": "Generative Furniture Studio",
+  "description": "Parametric furniture design tool using serpentine logic for 3D printing.",
+  "requestFramePermissions": []
+}
