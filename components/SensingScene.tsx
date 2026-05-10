@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
 import { STLExporter } from 'three/examples/jsm/exporters/STLExporter';
+import * as BufferGeometryUtils from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import GUI from 'lil-gui';
 import { 
   generateFurniture,
@@ -11,6 +12,76 @@ import {
   type FurnitureType,
   type FurniturePattern
 } from '../utils/geometry';
+
+// Helper to create a watertight tube with caps
+function createCappedTubeGeometry(curve: THREE.Curve<THREE.Vector3>, segments: number, radius: number, radialSegments: number): THREE.BufferGeometry {
+    const tubeGeo = new THREE.TubeGeometry(curve, segments, radius, radialSegments, false);
+    
+    // We manually construct caps using the tube's own end vertices to ensure perfect matching
+    const pos = tubeGeo.attributes.position;
+    const vertsPerRing = radialSegments + 1;
+    
+    // 1. Calculate Centroids
+    const startCenter = new THREE.Vector3();
+    for(let i=0; i<radialSegments; i++) {
+        startCenter.add(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+    }
+    startCenter.divideScalar(radialSegments);
+    
+    const endCenter = new THREE.Vector3();
+    const endStart = segments * vertsPerRing;
+    for(let i=0; i<radialSegments; i++) {
+        endCenter.add(new THREE.Vector3(pos.getX(endStart + i), pos.getY(endStart + i), pos.getZ(endStart + i)));
+    }
+    endCenter.divideScalar(radialSegments);
+    
+    // 2. Build Cap Geometry
+    const capPositions: number[] = [];
+    
+    // Start Cap (Reverse winding for outward normal)
+    for(let i=0; i<radialSegments; i++) {
+        capPositions.push(startCenter.x, startCenter.y, startCenter.z);
+        capPositions.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+        capPositions.push(pos.getX(i+1), pos.getY(i+1), pos.getZ(i+1));
+    }
+    
+    // End Cap (Standard winding)
+    for(let i=0; i<radialSegments; i++) {
+        capPositions.push(endCenter.x, endCenter.y, endCenter.z);
+        capPositions.push(pos.getX(endStart + i+1), pos.getY(endStart + i+1), pos.getZ(endStart + i+1));
+        capPositions.push(pos.getX(endStart + i), pos.getY(endStart + i), pos.getZ(endStart + i));
+    }
+    
+    const capsGeo = new THREE.BufferGeometry();
+    capsGeo.setAttribute('position', new THREE.Float32BufferAttribute(capPositions, 3));
+    // Calculate normals for caps so they match the tube's attributes
+    capsGeo.computeVertexNormals();
+    
+    // 3. Prepare Tube for Merge
+    // TubeGeometry is indexed, but caps are not. We must convert tube to non-indexed.
+    const tubeNonIndexed = tubeGeo.toNonIndexed();
+    // Tube has UVs, caps do not. Remove UVs to ensure matching attributes for merge.
+    tubeNonIndexed.deleteAttribute('uv');
+    
+    // Dispose original indexed tube
+    tubeGeo.dispose();
+    
+    // 4. Merge
+    // Now both geometries are non-indexed and have only 'position' and 'normal' attributes.
+    const merged = BufferGeometryUtils.mergeGeometries([tubeNonIndexed, capsGeo], false);
+    
+    // Cleanup
+    tubeNonIndexed.dispose();
+    capsGeo.dispose();
+    
+    // Safety check
+    if (!merged) {
+        console.warn('Geometry merge failed, returning fallback.');
+        return new THREE.BufferGeometry();
+    }
+    
+    return merged;
+}
 
 const SensingScene: React.FC = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -170,7 +241,7 @@ const SensingScene: React.FC = () => {
         exportGroup.scale.set(1000, 1000, 1000); 
         exportGroup.updateMatrixWorld(true);
 
-        const result = exporter.parse(exportGroup);
+        const result = exporter.parse(exportGroup, { binary: true });
         const blob = new Blob([result], { type: 'application/octet-stream' });
         const link = document.createElement('a');
         link.style.display = 'none';
@@ -281,7 +352,7 @@ const SensingScene: React.FC = () => {
           furnitureGroup.add(m);
         }
 
-        // --- Serpentine Tube ---
+        // --- Serpentine Tube (Watertight) ---
         const offset = jointRadius * 0.8; 
         const start = a.clone().addScaledVector(safeUnit(vec), offset);
         const end = b.clone().addScaledVector(safeUnit(vec), -offset);
@@ -297,7 +368,9 @@ const SensingScene: React.FC = () => {
         }
 
         const curve = new THREE.CatmullRomCurve3(serpPts);
-        const tubeGeo = new THREE.TubeGeometry(curve, params.segments, params.thickness, 6, false);
+        // Use custom capped tube helper
+        const tubeGeo = createCappedTubeGeometry(curve, params.segments, params.thickness, 6);
+        
         const tubeMesh = new THREE.Mesh(tubeGeo, MAT_PRINT);
         tubeMesh.castShadow = true;
         tubeMesh.receiveShadow = true;
